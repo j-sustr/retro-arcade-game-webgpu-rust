@@ -16,13 +16,15 @@ cargo install wasm-bindgen-cli --version 0.2.122
 Then build the demo:
 
 ```sh
-./build.sh
+just build
 ```
 
 Serve the directory with any static file server:
 
 ```sh
-python3 -m http.server 8080
+just serve
 ```
 
 Then open http://127.0.0.1:8080/.
+
+You can also run `just dev` to build and serve in one step.
