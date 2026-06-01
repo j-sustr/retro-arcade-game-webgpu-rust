@@ -2,6 +2,12 @@ set shell := ["sh", "-cu"]
 
 port := "8080"
 
+alias b := build
+alias s := serve
+alias d := dev
+alias c := clean
+alias x := stop
+
 default:
     just --list
 
@@ -12,6 +18,15 @@ serve:
     python3 -m http.server {{port}}
 
 dev: build serve
+
+stop:
+    pids="$$(lsof -ti tcp:{{port}} || true)"; \
+    if [ -n "$$pids" ]; then \
+      echo "Stopping server on port {{port}}: $$pids"; \
+      kill $$pids; \
+    else \
+      echo "No server listening on port {{port}}"; \
+    fi
 
 clean:
     cargo clean
