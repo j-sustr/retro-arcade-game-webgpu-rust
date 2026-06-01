@@ -35,6 +35,7 @@ struct VertexIn {
 struct VertexOut {
   @builtin(position) pos: vec4f,
   @location(0) uv: vec2f,
+  @location(1) fog: f32,
 }
 
 struct Camera {
@@ -50,18 +51,25 @@ struct GridArgs {
 }
 @group(1) @binding(0) var<uniform> gridArgs: GridArgs;
 
+const FOG_COLOR = vec4f(0.115, 0.02, 0.25, 1.0);
+const FOG_START = 72.0;
+const FOG_END = 210.0;
+
 @vertex
 fn vertexMain(in: VertexIn) -> VertexOut {
   var out: VertexOut;
-  out.pos = camera.projection * camera.view * in.pos;
+  let viewPos = camera.view * in.pos;
+  out.pos = camera.projection * viewPos;
   out.uv = in.uv;
+  out.fog = smoothstep(FOG_START, FOG_END, -viewPos.z);
   return out;
 }
 
 @fragment
 fn fragmentMain(in: VertexOut) -> @location(0) vec4f {
   let grid = PristineGrid(in.uv, gridArgs.lineWidth);
-  return mix(gridArgs.baseColor, gridArgs.lineColor, grid * gridArgs.lineColor.a);
+  let color = mix(gridArgs.baseColor, gridArgs.lineColor, grid * gridArgs.lineColor.a);
+  return mix(color, FOG_COLOR, in.fog);
 }
 "#;
 
@@ -74,6 +82,7 @@ struct VertexIn {
 struct VertexOut {
   @builtin(position) pos: vec4f,
   @location(0) color: vec4f,
+  @location(1) fog: f32,
 }
 
 struct Camera {
@@ -82,17 +91,23 @@ struct Camera {
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 
+const FOG_COLOR = vec4f(0.115, 0.02, 0.25, 1.0);
+const FOG_START = 58.0;
+const FOG_END = 205.0;
+
 @vertex
 fn vertexMain(in: VertexIn) -> VertexOut {
   var out: VertexOut;
-  out.pos = camera.projection * camera.view * in.pos;
+  let viewPos = camera.view * in.pos;
+  out.pos = camera.projection * viewPos;
   out.color = in.color;
+  out.fog = smoothstep(FOG_START, FOG_END, -viewPos.z);
   return out;
 }
 
 @fragment
 fn fragmentMain(in: VertexOut) -> @location(0) vec4f {
-  return in.color;
+  return mix(in.color, FOG_COLOR, in.fog);
 }
 "#;
 
