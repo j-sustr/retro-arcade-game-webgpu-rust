@@ -2,7 +2,14 @@
 
 A tiny Rust/WASM arcade game built on a WebGPU implementation of the "Pristine Grid" technique described in this wonderful little blog post: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
 
-Pilot a neon ship across the grid, dodge incoming hazards, shoot for score, and grab shield pickups when the wave starts getting spicy.
+Pilot a neon ship across the grid, dodge incoming hazards, ride toward the horizon, and grab shield pickups when the wave starts getting spicy.
+
+Controls:
+
+- `A` / `D` or arrow keys: steer left and right
+- `W` / up arrow or space while riding: boost
+- Space / Enter: start or restart
+- `P`: pause
 
 ## Build
 
