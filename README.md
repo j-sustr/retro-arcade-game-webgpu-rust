@@ -1,8 +1,8 @@
-# Pristine Grid WebGPU
+# Neon Grid 2084
 
-A Rust/WASM WebGPU implementation of the "Pristine Grid" technique described in this wonderful little blog post: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
+A tiny Rust/WASM arcade game built on a WebGPU implementation of the "Pristine Grid" technique described in this wonderful little blog post: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
 
-Nothing fancy to see here, just a very direct port of the shader to WGSL and a minimal Rust render loop to display it in the browser.
+Pilot a neon ship across the grid, dodge incoming hazards, shoot for score, and grab shield pickups when the wave starts getting spicy.
 
 ## Build
 
@@ -11,6 +11,12 @@ Install the Rust WebAssembly target and the `wasm-bindgen` CLI once:
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.122
+```
+
+Install Caddy if you want to use the included serve recipes:
+
+```sh
+brew install caddy
 ```
 
 Then build the demo:

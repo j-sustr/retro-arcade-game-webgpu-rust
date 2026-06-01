@@ -12,22 +12,22 @@ default:
     just --list
 
 build:
-    ./build.sh
+    @./build.sh
 
 serve:
-    python3 -m http.server {{port}}
+    @caddy file-server --listen :{{port}} --root .
 
 dev: build serve
 
 stop:
-    pids="$$(lsof -ti tcp:{{port}} || true)"; \
-    if [ -n "$$pids" ]; then \
-      echo "Stopping server on port {{port}}: $$pids"; \
-      kill $$pids; \
+    @pids="$(lsof -ti tcp:{{port}} || true)"; \
+    if [ -n "$pids" ]; then \
+      echo "Stopping server on port {{port}}: $pids"; \
+      kill $pids; \
     else \
       echo "No server listening on port {{port}}"; \
     fi
 
 clean:
-    cargo clean
-    rm -rf pkg
+    @cargo clean
+    @rm -rf pkg

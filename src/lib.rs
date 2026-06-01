@@ -6,7 +6,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
-    Document, Event, HtmlCanvasElement, HtmlInputElement, PointerEvent, WheelEvent, Window,
+    Document, Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, WheelEvent, Window,
 };
 
 const GRID_SHADER: &str = r#"
@@ -71,6 +71,8 @@ const GPU_BUFFER_USAGE_UNIFORM: u32 = 64;
 const GPU_SHADER_STAGE_VERTEX: u32 = 1;
 const GPU_SHADER_STAGE_FRAGMENT: u32 = 2;
 const GPU_TEXTURE_USAGE_RENDER_ATTACHMENT: u32 = 16;
+const FIELD_WIDTH: f32 = 100.0;
+const FIELD_HEIGHT: f32 = 100.0;
 
 type JsResult<T> = Result<T, JsValue>;
 
@@ -88,6 +90,12 @@ struct GridDemo {
     window: Window,
     document: Document,
     canvas: HtmlCanvasElement,
+    field: Element,
+    ship: Element,
+    hud_score: Element,
+    hud_shields: Element,
+    hud_wave: Element,
+    marquee: Element,
     context: JsValue,
     device: JsValue,
     queue: JsValue,
@@ -109,6 +117,8 @@ struct GridDemo {
     height: u32,
     last_pointer: Option<(f32, f32)>,
     moving: bool,
+    game: GameState,
+    last_timestamp: Option<f64>,
 }
 
 impl GridDemo {
@@ -223,11 +233,18 @@ impl GridDemo {
         )?;
         write_f32_buffer(&queue, &vertex_buffer, &vertices)?;
         write_u32_buffer(&queue, &index_buffer, &indices)?;
+        let arcade = create_arcade_overlay(&document)?;
 
         let demo = Rc::new(RefCell::new(Self {
             window,
             document,
             canvas,
+            field: arcade.field,
+            ship: arcade.ship,
+            hud_score: arcade.hud_score,
+            hud_shields: arcade.hud_shields,
+            hud_wave: arcade.hud_wave,
+            marquee: arcade.marquee,
             context: context.into(),
             device,
             queue,
@@ -240,19 +257,20 @@ impl GridDemo {
             vertex_buffer,
             index_buffer,
             depth_texture: None,
-            clear_color: [0.0, 0.0, 0.2, 1.0],
-            line_color: [1.0, 1.0, 1.0, 1.0],
-            base_color: [0.0, 0.0, 0.0, 1.0],
-            line_width: [0.05, 0.05],
+            clear_color: [0.015, 0.0, 0.08, 1.0],
+            line_color: [0.0, 0.96, 1.0, 0.92],
+            base_color: [0.01, 0.0, 0.035, 1.0],
+            line_width: [0.035, 0.035],
             camera: OrbitCamera::new(),
             width: 0,
             height: 0,
             last_pointer: None,
             moving: false,
+            game: GameState::new(),
+            last_timestamp: None,
         }));
 
         demo.borrow().write_grid_uniforms(&grid_uniform_buffer)?;
-        create_controls(&demo, &grid_uniform_buffer)?;
         attach_input_handlers(&demo)?;
         attach_resize_handler(&demo)?;
         demo.borrow_mut().resize()?;
@@ -290,6 +308,13 @@ impl GridDemo {
 
     fn frame(&mut self, timestamp: f64) -> JsResult<()> {
         self.resize()?;
+        let dt = self
+            .last_timestamp
+            .map(|last| ((timestamp - last) as f32 / 1000.0).clamp(0.0, 0.05))
+            .unwrap_or(0.0);
+        self.last_timestamp = Some(timestamp);
+        self.game.update(dt);
+        self.render_arcade()?;
 
         let aspect = self.width as f32 / self.height as f32;
         let projection = perspective_zo(PI * 0.5, aspect, 0.01, 128.0);
@@ -360,9 +385,6 @@ impl GridDemo {
         commands.push(&call_method(&encoder, "finish", &[])?);
         call_method(&self.queue, "submit", &[commands.into()])?;
 
-        if let Some(node) = self.document.get_element_by_id("frame-time") {
-            node.set_text_content(Some(&format!("{:.2} ms", timestamp.fract())));
-        }
         Ok(())
     }
 
@@ -373,105 +395,383 @@ impl GridDemo {
         uniforms[8..10].copy_from_slice(&self.line_width);
         write_f32_buffer(&self.queue, buffer, &uniforms)
     }
+
+    fn render_arcade(&self) -> JsResult<()> {
+        self.ship.set_attribute(
+            "style",
+            &format!(
+                "--x:{:.3}; --y:{:.3}; --tilt:{:.3}deg;",
+                self.game.player.x, self.game.player.y, self.game.player.tilt
+            ),
+        )?;
+
+        self.hud_score
+            .set_text_content(Some(&format!("{:06}", self.game.score)));
+        self.hud_shields
+            .set_text_content(Some(&format!("{}", self.game.shields)));
+        self.hud_wave
+            .set_text_content(Some(&format!("{}", self.game.wave)));
+
+        if self.game.mode == GameMode::Attract {
+            self.marquee.set_attribute("data-show", "true")?;
+            self.marquee.set_text_content(Some("NEON GRID 2084  START"));
+        } else if self.game.mode == GameMode::GameOver {
+            self.marquee.set_attribute("data-show", "true")?;
+            self.marquee.set_text_content(Some("GAME OVER  START"));
+        } else if self.game.paused {
+            self.marquee.set_attribute("data-show", "true")?;
+            self.marquee.set_text_content(Some("PAUSED"));
+        } else {
+            self.marquee.set_attribute("data-show", "false")?;
+        }
+
+        let mut html = String::new();
+        for shot in &self.game.shots {
+            html.push_str(&format!(
+                r#"<i class="beam" style="--x:{:.3};--y:{:.3};"></i>"#,
+                shot.x, shot.y
+            ));
+        }
+        for enemy in &self.game.enemies {
+            html.push_str(&format!(
+                r#"<i class="enemy e{}" style="--x:{:.3};--y:{:.3};--s:{:.3};"></i>"#,
+                enemy.kind, enemy.x, enemy.y, enemy.size
+            ));
+        }
+        for pickup in &self.game.pickups {
+            html.push_str(&format!(
+                r#"<i class="pickup" style="--x:{:.3};--y:{:.3};"></i>"#,
+                pickup.x, pickup.y
+            ));
+        }
+        self.field.set_inner_html(&html);
+        Ok(())
+    }
 }
 
-fn create_controls(demo: &Rc<RefCell<GridDemo>>, uniform_buffer: &JsValue) -> JsResult<()> {
-    let document = demo.borrow().document.clone();
-    let panel = document.create_element("form")?;
-    panel.set_class_name("controls");
-    panel.set_inner_html(
-        r##"
-        <h1>Pristine Grid</h1>
-        <label>Clear <input id="clear-color" type="color" value="#000033"></label>
-        <label>Base <input id="base-color" type="color" value="#000000"></label>
-        <label>Line <input id="line-color" type="color" value="#ffffff"></label>
-        <label>Line Alpha <input id="line-alpha" type="range" min="0" max="1" step="0.01" value="1"></label>
-        <label>Width X <input id="line-width-x" type="range" min="0" max="1" step="0.001" value="0.05"></label>
-        <label>Width Y <input id="line-width-y" type="range" min="0" max="1" step="0.001" value="0.05"></label>
-        <a href="https://github.com/toji/pristine-grid-webgpu" target="_blank" rel="noreferrer">View Source</a>
-        "##,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GameMode {
+    Attract,
+    Playing,
+    GameOver,
+}
+
+struct ArcadeOverlay {
+    field: Element,
+    ship: Element,
+    hud_score: Element,
+    hud_shields: Element,
+    hud_wave: Element,
+    marquee: Element,
+}
+
+struct GameState {
+    mode: GameMode,
+    paused: bool,
+    player: Player,
+    enemies: Vec<Entity>,
+    shots: Vec<Entity>,
+    pickups: Vec<Entity>,
+    input: InputState,
+    score: u32,
+    shields: u32,
+    wave: u32,
+    enemy_timer: f32,
+    pickup_timer: f32,
+    fire_cooldown: f32,
+    rng: u32,
+}
+
+struct Player {
+    x: f32,
+    y: f32,
+    tilt: f32,
+}
+
+#[derive(Clone)]
+struct Entity {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    size: f32,
+    kind: u32,
+}
+
+#[derive(Default)]
+struct InputState {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    fire: bool,
+}
+
+impl GameState {
+    fn new() -> Self {
+        Self {
+            mode: GameMode::Attract,
+            paused: false,
+            player: Player {
+                x: 50.0,
+                y: 83.0,
+                tilt: 0.0,
+            },
+            enemies: Vec::new(),
+            shots: Vec::new(),
+            pickups: Vec::new(),
+            input: InputState::default(),
+            score: 0,
+            shields: 3,
+            wave: 1,
+            enemy_timer: 0.2,
+            pickup_timer: 4.0,
+            fire_cooldown: 0.0,
+            rng: 0x2084_1986,
+        }
+    }
+
+    fn start(&mut self) {
+        let rng = self.rng.wrapping_add(0x9e37_79b9);
+        *self = Self::new();
+        self.rng = rng;
+        self.mode = GameMode::Playing;
+    }
+
+    fn update(&mut self, dt: f32) {
+        if self.mode != GameMode::Playing || self.paused {
+            return;
+        }
+
+        let mut dx: f32 = 0.0;
+        let mut dy: f32 = 0.0;
+        if self.input.left {
+            dx -= 1.0;
+        }
+        if self.input.right {
+            dx += 1.0;
+        }
+        if self.input.up {
+            dy -= 1.0;
+        }
+        if self.input.down {
+            dy += 1.0;
+        }
+
+        let speed = 46.0 + self.wave as f32 * 2.0;
+        self.player.x = (self.player.x + dx * speed * dt).clamp(8.0, 92.0);
+        self.player.y = (self.player.y + dy * speed * dt).clamp(58.0, 91.0);
+        self.player.tilt += ((dx * 18.0) - self.player.tilt) * (dt * 12.0).min(1.0);
+
+        self.fire_cooldown = (self.fire_cooldown - dt).max(0.0);
+        if self.input.fire && self.fire_cooldown <= 0.0 {
+            self.fire_cooldown = 0.16;
+            self.shots.push(Entity {
+                x: self.player.x,
+                y: self.player.y - 6.0,
+                vx: 0.0,
+                vy: -90.0,
+                size: 2.6,
+                kind: 0,
+            });
+        }
+
+        self.enemy_timer -= dt;
+        if self.enemy_timer <= 0.0 {
+            let wave_speed = 18.0 + self.wave as f32 * 3.2;
+            self.enemy_timer = (0.85 - self.wave as f32 * 0.045).max(0.26);
+            let lane = self.random_range(10.0, 90.0);
+            let drift = self.random_range(-10.0, 10.0);
+            let speed = wave_speed + self.random_range(0.0, 12.0);
+            let size = self.random_range(5.0, 8.5);
+            let kind = if self.rng & 1 == 0 { 0 } else { 1 };
+            self.enemies.push(Entity {
+                x: lane,
+                y: -8.0,
+                vx: drift,
+                vy: speed,
+                size,
+                kind,
+            });
+        }
+
+        self.pickup_timer -= dt;
+        if self.pickup_timer <= 0.0 {
+            self.pickup_timer = self.random_range(5.5, 8.5);
+            let x = self.random_range(12.0, 88.0);
+            self.pickups.push(Entity {
+                x,
+                y: -8.0,
+                vx: 0.0,
+                vy: 24.0,
+                size: 4.0,
+                kind: 0,
+            });
+        }
+
+        for shot in &mut self.shots {
+            shot.y += shot.vy * dt;
+        }
+        for enemy in &mut self.enemies {
+            enemy.x = (enemy.x + enemy.vx * dt).clamp(5.0, 95.0);
+            enemy.y += enemy.vy * dt;
+        }
+        for pickup in &mut self.pickups {
+            pickup.y += pickup.vy * dt;
+        }
+
+        self.resolve_hits();
+        self.shots.retain(|shot| shot.y > -8.0);
+        self.enemies.retain(|enemy| enemy.y < 112.0);
+        self.pickups.retain(|pickup| pickup.y < 112.0);
+
+        self.score = self.score.saturating_add((dt * 18.0) as u32);
+        self.wave = 1 + self.score / 1200;
+    }
+
+    fn resolve_hits(&mut self) {
+        let mut dead_enemies = vec![false; self.enemies.len()];
+        let mut dead_shots = vec![false; self.shots.len()];
+
+        for (shot_index, shot) in self.shots.iter().enumerate() {
+            for (enemy_index, enemy) in self.enemies.iter().enumerate() {
+                if dead_enemies[enemy_index] {
+                    continue;
+                }
+                if distance2(shot.x, shot.y, enemy.x, enemy.y) < (enemy.size + shot.size).powi(2) {
+                    dead_enemies[enemy_index] = true;
+                    dead_shots[shot_index] = true;
+                    self.score = self.score.saturating_add(120 + self.wave * 10);
+                    break;
+                }
+            }
+        }
+
+        let px = self.player.x;
+        let py = self.player.y;
+        for (enemy_index, enemy) in self.enemies.iter().enumerate() {
+            if dead_enemies[enemy_index] {
+                continue;
+            }
+            if distance2(px, py, enemy.x, enemy.y) < (enemy.size + 5.5).powi(2) {
+                dead_enemies[enemy_index] = true;
+                self.shields = self.shields.saturating_sub(1);
+                if self.shields == 0 {
+                    self.mode = GameMode::GameOver;
+                }
+            }
+        }
+
+        let mut dead_pickups = vec![false; self.pickups.len()];
+        for (pickup_index, pickup) in self.pickups.iter().enumerate() {
+            if distance2(px, py, pickup.x, pickup.y) < (pickup.size + 6.0).powi(2) {
+                dead_pickups[pickup_index] = true;
+                self.score = self.score.saturating_add(300);
+                self.shields = (self.shields + 1).min(5);
+            }
+        }
+
+        let mut enemy_index = 0;
+        self.enemies.retain(|_| {
+            let keep = !dead_enemies[enemy_index];
+            enemy_index += 1;
+            keep
+        });
+        let mut shot_index = 0;
+        self.shots.retain(|_| {
+            let keep = !dead_shots[shot_index];
+            shot_index += 1;
+            keep
+        });
+        let mut pickup_index = 0;
+        self.pickups.retain(|_| {
+            let keep = !dead_pickups[pickup_index];
+            pickup_index += 1;
+            keep
+        });
+    }
+
+    fn random_range(&mut self, min: f32, max: f32) -> f32 {
+        self.rng = self.rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let unit = ((self.rng >> 8) as f32) / ((u32::MAX >> 8) as f32);
+        min + (max - min) * unit
+    }
+}
+
+fn distance2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let dx = ax - bx;
+    let dy = ay - by;
+    dx * dx + dy * dy
+}
+
+fn create_arcade_overlay(document: &Document) -> JsResult<ArcadeOverlay> {
+    let hud = document.create_element("section")?;
+    hud.set_class_name("hud");
+    hud.set_inner_html(
+        r#"
+        <div><span>SCORE</span><strong id="hud-score">000000</strong></div>
+        <div><span>SHIELDS</span><strong id="hud-shields">3</strong></div>
+        <div><span>WAVE</span><strong id="hud-wave">1</strong></div>
+        "#,
     );
-    document.body().unwrap().append_child(&panel)?;
+    document.body().unwrap().append_child(&hud)?;
 
-    bind_color(demo, uniform_buffer, "clear-color", |demo, color| {
-        demo.clear_color = color
-    })?;
-    bind_color(demo, uniform_buffer, "base-color", |demo, color| {
-        demo.base_color = color
-    })?;
-    bind_color(demo, uniform_buffer, "line-color", |demo, color| {
-        demo.line_color[0] = color[0];
-        demo.line_color[1] = color[1];
-        demo.line_color[2] = color[2];
-    })?;
-    bind_range(demo, uniform_buffer, "line-alpha", |demo, value| {
-        demo.line_color[3] = value
-    })?;
-    bind_range(demo, uniform_buffer, "line-width-x", |demo, value| {
-        demo.line_width[0] = value
-    })?;
-    bind_range(demo, uniform_buffer, "line-width-y", |demo, value| {
-        demo.line_width[1] = value
-    })?;
-    Ok(())
-}
+    let field = document.create_element("div")?;
+    field.set_class_name("game-field");
+    document.body().unwrap().append_child(&field)?;
 
-fn bind_color<F>(
-    demo: &Rc<RefCell<GridDemo>>,
-    uniform_buffer: &JsValue,
-    id: &str,
-    mut update: F,
-) -> JsResult<()>
-where
-    F: 'static + FnMut(&mut GridDemo, [f32; 4]),
-{
-    let input = input_by_id(&demo.borrow().document, id)?;
-    let demo = Rc::clone(demo);
-    let uniform_buffer = uniform_buffer.clone();
-    let closure = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
-        let input: HtmlInputElement = event.target().unwrap().dyn_into().unwrap();
-        let color = parse_hex_color(&input.value(), 1.0);
-        let mut demo = demo.borrow_mut();
-        update(&mut demo, color);
-        let _ = demo.write_grid_uniforms(&uniform_buffer);
-    });
-    input.add_event_listener_with_callback("input", closure.as_ref().unchecked_ref())?;
-    closure.forget();
-    Ok(())
-}
+    let ship = document.create_element("div")?;
+    ship.set_class_name("ship");
+    ship.set_attribute("style", "--x:50; --y:83; --tilt:0deg;")?;
+    document.body().unwrap().append_child(&ship)?;
 
-fn bind_range<F>(
-    demo: &Rc<RefCell<GridDemo>>,
-    uniform_buffer: &JsValue,
-    id: &str,
-    mut update: F,
-) -> JsResult<()>
-where
-    F: 'static + FnMut(&mut GridDemo, f32),
-{
-    let input = input_by_id(&demo.borrow().document, id)?;
-    let demo = Rc::clone(demo);
-    let uniform_buffer = uniform_buffer.clone();
-    let closure = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
-        let input: HtmlInputElement = event.target().unwrap().dyn_into().unwrap();
-        let value = input.value().parse::<f32>().unwrap_or(0.0);
-        let demo_ref = &mut *demo.borrow_mut();
-        update(demo_ref, value);
-        let _ = demo_ref.write_grid_uniforms(&uniform_buffer);
-    });
-    input.add_event_listener_with_callback("input", closure.as_ref().unchecked_ref())?;
-    closure.forget();
-    Ok(())
+    let marquee = document.create_element("div")?;
+    marquee.set_class_name("marquee");
+    marquee.set_attribute("data-show", "true")?;
+    marquee.set_text_content(Some("NEON GRID 2084  START"));
+    document.body().unwrap().append_child(&marquee)?;
+
+    Ok(ArcadeOverlay {
+        field,
+        ship,
+        hud_score: required_element(document, "hud-score")?,
+        hud_shields: required_element(document, "hud-shields")?,
+        hud_wave: required_element(document, "hud-wave")?,
+        marquee,
+    })
 }
 
 fn attach_input_handlers(demo: &Rc<RefCell<GridDemo>>) -> JsResult<()> {
     let canvas = demo.borrow().canvas.clone();
+
+    let key_demo = Rc::clone(demo);
+    let on_key_down = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        handle_key(&key_demo, &event, true);
+    });
+    demo.borrow()
+        .document
+        .add_event_listener_with_callback("keydown", on_key_down.as_ref().unchecked_ref())?;
+    on_key_down.forget();
+
+    let key_demo = Rc::clone(demo);
+    let on_key_up = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        handle_key(&key_demo, &event, false);
+    });
+    demo.borrow()
+        .document
+        .add_event_listener_with_callback("keyup", on_key_up.as_ref().unchecked_ref())?;
+    on_key_up.forget();
 
     let down_demo = Rc::clone(demo);
     let on_down = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
         let mut demo = down_demo.borrow_mut();
         demo.moving = event.is_primary();
         demo.last_pointer = Some((event.page_x() as f32, event.page_y() as f32));
+        if demo.game.mode != GameMode::Playing {
+            demo.game.start();
+        }
+        demo.game.input.fire = true;
+        position_player_from_pointer(&mut demo, event.client_x() as f32, event.client_y() as f32);
     });
     canvas.add_event_listener_with_callback("pointerdown", on_down.as_ref().unchecked_ref())?;
     on_down.forget();
@@ -483,10 +783,8 @@ fn attach_input_handlers(demo: &Rc<RefCell<GridDemo>>) -> JsResult<()> {
             return;
         }
         let current = (event.page_x() as f32, event.page_y() as f32);
-        if let Some(last) = demo.last_pointer {
-            demo.camera
-                .orbit((current.0 - last.0) * 0.025, (current.1 - last.1) * 0.025);
-        }
+        position_player_from_pointer(&mut demo, event.client_x() as f32, event.client_y() as f32);
+        demo.player_tilt_from_pointer(current.0);
         demo.last_pointer = Some(current);
     });
     canvas.add_event_listener_with_callback("pointermove", on_move.as_ref().unchecked_ref())?;
@@ -495,7 +793,9 @@ fn attach_input_handlers(demo: &Rc<RefCell<GridDemo>>) -> JsResult<()> {
     let up_demo = Rc::clone(demo);
     let on_up = Closure::<dyn FnMut(PointerEvent)>::new(move |event: PointerEvent| {
         if event.is_primary() {
-            up_demo.borrow_mut().moving = false;
+            let mut demo = up_demo.borrow_mut();
+            demo.moving = false;
+            demo.game.input.fire = false;
         }
     });
     canvas.add_event_listener_with_callback("pointerup", on_up.as_ref().unchecked_ref())?;
@@ -514,6 +814,55 @@ fn attach_input_handlers(demo: &Rc<RefCell<GridDemo>>) -> JsResult<()> {
     on_wheel.forget();
 
     Ok(())
+}
+
+impl GridDemo {
+    fn player_tilt_from_pointer(&mut self, x: f32) {
+        if let Some(last) = self.last_pointer {
+            self.game.player.tilt = ((x - last.0) * 0.8).clamp(-24.0, 24.0);
+        }
+    }
+}
+
+fn handle_key(demo: &Rc<RefCell<GridDemo>>, event: &KeyboardEvent, pressed: bool) {
+    let key = event.key();
+    let mut demo = demo.borrow_mut();
+    match key.as_str() {
+        "ArrowLeft" | "a" | "A" => demo.game.input.left = pressed,
+        "ArrowRight" | "d" | "D" => demo.game.input.right = pressed,
+        "ArrowUp" | "w" | "W" => demo.game.input.up = pressed,
+        "ArrowDown" | "s" | "S" => demo.game.input.down = pressed,
+        " " | "Spacebar" => {
+            if pressed {
+                if demo.game.mode == GameMode::Playing {
+                    demo.game.input.fire = true;
+                } else {
+                    demo.game.start();
+                }
+            } else {
+                demo.game.input.fire = false;
+            }
+        }
+        "Enter" => {
+            if pressed && demo.game.mode != GameMode::Playing {
+                demo.game.start();
+            }
+        }
+        "p" | "P" => {
+            if pressed && demo.game.mode == GameMode::Playing {
+                demo.game.paused = !demo.game.paused;
+            }
+        }
+        _ => return,
+    }
+    event.prevent_default();
+}
+
+fn position_player_from_pointer(demo: &mut GridDemo, client_x: f32, client_y: f32) {
+    let width = demo.canvas.client_width().max(1) as f32;
+    let height = demo.canvas.client_height().max(1) as f32;
+    demo.game.player.x = (client_x / width * FIELD_WIDTH).clamp(8.0, 92.0);
+    demo.game.player.y = (client_y / height * FIELD_HEIGHT).clamp(58.0, 91.0);
 }
 
 fn attach_resize_handler(demo: &Rc<RefCell<GridDemo>>) -> JsResult<()> {
@@ -569,12 +918,6 @@ impl OrbitCamera {
             dirty: true,
             view: identity(),
         }
-    }
-
-    fn orbit(&mut self, x_delta: f32, y_delta: f32) {
-        self.orbit_y = wrap_pi(self.orbit_y + x_delta);
-        self.orbit_x = (self.orbit_x + y_delta).clamp(-PI * 0.5, PI * 0.5);
-        self.dirty = true;
     }
 
     fn view_matrix(&mut self) -> [f32; 16] {
@@ -797,33 +1140,10 @@ fn invert_rigid_body(m: &[f32; 16]) -> [f32; 16] {
     out
 }
 
-fn wrap_pi(mut value: f32) -> f32 {
-    while value < -PI {
-        value += PI * 2.0;
-    }
-    while value >= PI {
-        value -= PI * 2.0;
-    }
-    value
-}
-
-fn parse_hex_color(hex: &str, alpha: f32) -> [f32; 4] {
-    let hex = hex.trim_start_matches('#');
-    if hex.len() != 6 {
-        return [0.0, 0.0, 0.0, alpha];
-    }
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f32 / 255.0;
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f32 / 255.0;
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
-    [r, g, b, alpha]
-}
-
-fn input_by_id(document: &Document, id: &str) -> JsResult<HtmlInputElement> {
+fn required_element(document: &Document, id: &str) -> JsResult<Element> {
     document
         .get_element_by_id(id)
-        .ok_or_else(|| JsValue::from_str(&format!("Missing input #{id}")))?
-        .dyn_into::<HtmlInputElement>()
-        .map_err(|_| JsValue::from_str(&format!("#{id} is not an input")))
+        .ok_or_else(|| JsValue::from_str(&format!("Missing element #{id}")))
 }
 
 fn inject_style(document: &Document) -> JsResult<()> {
@@ -833,9 +1153,24 @@ fn inject_style(document: &Document) -> JsResult<()> {
         html, body {
           height: 100%;
           margin: 0;
-          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          background: #151515;
+          font-family: Orbitron, ui-monospace, monospace;
+          background:
+            radial-gradient(circle at 50% 18%, rgba(255, 0, 156, 0.28), transparent 30%),
+            linear-gradient(#080016, #000);
           overflow: hidden;
+        }
+
+        body::before {
+          content: "";
+          position: fixed;
+          inset: 0;
+          z-index: 1;
+          pointer-events: none;
+          background:
+            linear-gradient(rgba(255,255,255,0.035) 50%, rgba(0,0,0,0.08) 50%),
+            radial-gradient(ellipse at 50% 95%, rgba(0, 240, 255, 0.2), transparent 35%);
+          background-size: 100% 4px, 100% 100%;
+          mix-blend-mode: screen;
         }
 
         canvas {
@@ -846,64 +1181,184 @@ fn inject_style(document: &Document) -> JsResult<()> {
           touch-action: none;
         }
 
-        .controls {
+        .hud {
           position: fixed;
-          top: 14px;
-          right: 14px;
+          top: 16px;
+          left: 50%;
+          transform: translateX(-50%);
           z-index: 3;
-          width: min(280px, calc(100vw - 28px));
-          display: grid;
-          gap: 10px;
-          padding: 12px;
+          width: min(760px, calc(100vw - 28px));
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 12px 16px;
           box-sizing: border-box;
-          background: rgba(24, 24, 24, 0.88);
-          border: 1px solid rgba(255, 255, 255, 0.14);
-          border-radius: 8px;
-          color: #f3f3f3;
-          backdrop-filter: blur(12px);
-          box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+          color: #fff;
+          background: linear-gradient(90deg, rgba(7, 0, 30, 0.72), rgba(32, 0, 62, 0.62));
+          border: 1px solid rgba(0, 240, 255, 0.5);
+          box-shadow:
+            0 0 18px rgba(0, 240, 255, 0.28),
+            inset 0 0 18px rgba(255, 0, 204, 0.18);
+          clip-path: polygon(14px 0, 100% 0, calc(100% - 14px) 100%, 0 100%);
+          text-shadow: 0 0 10px rgba(0, 240, 255, 0.9);
         }
 
-        .controls h1 {
-          margin: 0 0 2px;
-          font-size: 15px;
-          font-weight: 650;
-          letter-spacing: 0;
-        }
-
-        .controls label {
+        .hud div {
           display: grid;
-          grid-template-columns: 88px minmax(0, 1fr);
-          align-items: center;
-          gap: 10px;
-          font-size: 12px;
-          color: #d8d8d8;
+          gap: 3px;
+          min-width: 92px;
         }
 
-        .controls input {
-          width: 100%;
-          box-sizing: border-box;
+        .hud span {
+          font-size: 10px;
+          letter-spacing: 0.22em;
+          color: #ff75de;
         }
 
-        .controls input[type="color"] {
-          height: 28px;
-          border: 0;
-          padding: 0;
-          background: transparent;
+        .hud strong {
+          font-size: clamp(16px, 3.2vw, 28px);
+          line-height: 1;
         }
 
-        .controls a {
-          color: #9fd3ff;
-          font-size: 12px;
-          text-decoration: none;
+        .game-field,
+        .ship {
+          position: fixed;
+          inset: 0;
+          z-index: 2;
+          pointer-events: none;
+        }
+
+        .ship {
+          left: calc(var(--x) * 1vw);
+          top: calc(var(--y) * 1vh);
+          width: 54px;
+          height: 70px;
+          transform: translate(-50%, -50%) rotate(var(--tilt));
+          filter:
+            drop-shadow(0 0 10px #00f0ff)
+            drop-shadow(0 0 22px rgba(255, 0, 204, 0.85));
+          background:
+            linear-gradient(135deg, transparent 0 25%, #00f0ff 25% 36%, transparent 36%),
+            linear-gradient(225deg, transparent 0 25%, #ff00cc 25% 36%, transparent 36%),
+            linear-gradient(#ffffff, #63f8ff 45%, #ff2bd6 46% 62%, transparent 62%);
+          clip-path: polygon(50% 0, 96% 84%, 62% 72%, 50% 100%, 38% 72%, 4% 84%);
+        }
+
+        .ship::after {
+          content: "";
+          position: absolute;
+          left: 50%;
+          top: 74%;
+          width: 18px;
+          height: 38px;
+          transform: translateX(-50%);
+          background: linear-gradient(#fff, #fffb00 25%, #ff4b00 70%, transparent);
+          clip-path: polygon(50% 100%, 0 0, 100% 0);
+          opacity: 0.86;
+        }
+
+        .beam,
+        .enemy,
+        .pickup {
+          position: absolute;
+          left: calc(var(--x) * 1vw);
+          top: calc(var(--y) * 1vh);
+          transform: translate(-50%, -50%);
+          display: block;
+        }
+
+        .beam {
+          width: 5px;
+          height: 34px;
+          border-radius: 999px;
+          background: #fff;
+          box-shadow: 0 0 12px #fff, 0 0 24px #00f0ff;
+        }
+
+        .enemy {
+          width: calc(var(--s) * 1.65vw);
+          height: calc(var(--s) * 1.65vw);
+          min-width: 38px;
+          min-height: 38px;
+          background:
+            linear-gradient(45deg, transparent 0 18%, #ff00cc 18% 35%, transparent 35%),
+            linear-gradient(135deg, transparent 0 18%, #00f0ff 18% 35%, transparent 35%),
+            radial-gradient(circle, #fff 0 10%, #ff00cc 12% 32%, #280036 34% 100%);
+          clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+          box-shadow: 0 0 18px rgba(255, 0, 204, 0.9), inset 0 0 16px rgba(0, 240, 255, 0.8);
+        }
+
+        .enemy.e1 {
+          border-radius: 50%;
+          clip-path: polygon(50% 0, 86% 16%, 100% 50%, 86% 84%, 50% 100%, 14% 84%, 0 50%, 14% 16%);
+          background:
+            radial-gradient(circle, #fff 0 8%, #00f0ff 11% 31%, #11002d 33% 100%);
+          box-shadow: 0 0 18px rgba(0, 240, 255, 0.9), inset 0 0 16px rgba(255, 0, 204, 0.7);
+        }
+
+        .pickup {
+          width: 30px;
+          height: 30px;
+          background: radial-gradient(circle, #fff 0 13%, #fffb00 16% 43%, transparent 46%);
+          box-shadow: 0 0 18px #fffb00, 0 0 34px rgba(255, 0, 204, 0.6);
+          clip-path: polygon(50% 0, 62% 36%, 100% 50%, 62% 64%, 50% 100%, 38% 64%, 0 50%, 38% 36%);
+        }
+
+        .marquee {
+          position: fixed;
+          left: 50%;
+          top: 50%;
+          z-index: 4;
+          transform: translate(-50%, -50%) skewX(-8deg);
+          padding: 20px 28px;
+          max-width: calc(100vw - 40px);
+          color: #fff;
+          font-size: clamp(26px, 7vw, 72px);
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          white-space: nowrap;
+          text-align: center;
+          text-shadow:
+            0 0 8px #fff,
+            0 0 22px #00f0ff,
+            0 0 42px #ff00cc;
+          background: rgba(8, 0, 22, 0.38);
+          border: 1px solid rgba(255, 255, 255, 0.24);
+          box-shadow: 0 0 40px rgba(255, 0, 204, 0.35);
+          transition: opacity 160ms ease, transform 160ms ease;
+        }
+
+        .marquee[data-show="false"] {
+          opacity: 0;
+          transform: translate(-50%, -48%) skewX(-8deg) scale(0.98);
         }
 
         .error {
           position: fixed;
-          z-index: 4;
+          z-index: 5;
           inset: 4rem;
           color: #ffb2b2;
           white-space: pre-wrap;
+        }
+
+        @media (max-width: 560px) {
+          .hud {
+            top: 10px;
+            padding: 10px;
+          }
+
+          .hud div {
+            min-width: 0;
+          }
+
+          .hud span {
+            font-size: 8px;
+          }
+
+          .ship {
+            width: 42px;
+            height: 56px;
+          }
         }
         "#,
     ));
