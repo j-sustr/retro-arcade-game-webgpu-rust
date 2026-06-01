@@ -1,6 +1,6 @@
 # Neon Grid 2084
 
-A tiny Rust/WASM arcade game built on a WebGPU implementation of the "Pristine Grid" technique described in this wonderful little blog post: https://bgolus.medium.com/the-best-darn-grid-shader-yet-727f9278b9d8
+A tiny Rust/WASM arcade game
 
 ![Neon Grid 2084 gameplay screenshot](assets/neon-grid-2084-screenshot.png)
 
